@@ -25,7 +25,7 @@ const OCR_APIS = {
     timeout: 15000, // 15 seconds
   },
   CLAUDE: {
-    model: 'claude-3-sonnet-20240229',
+    model: 'claude-4-5-sonnet-20241022',
     maxTokens: 1024,
     timeout: 20000, // 20 seconds
   }

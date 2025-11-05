@@ -13,7 +13,7 @@ class LLMService {
   // Generic LLM completion method
   async complete(prompt, options = {}) {
     const {
-      model = 'claude-3-haiku-20240307',
+      model = 'claude-4-5-sonnet-20241022',
       maxTokens = 1000,
       temperature = 0.7,
       systemPrompt = null
@@ -106,7 +106,7 @@ class LLMService {
 
     try {
       const response = await this.complete(prompt, {
-        model: 'claude-3-sonnet-20240229',
+        model: 'claude-4-5-sonnet-20241022',
         maxTokens: 2000,
         temperature: 0.3,
         systemPrompt: 'You are an expert educational consultant helping students prepare for academic and professional events. Provide detailed, actionable advice.'
@@ -141,7 +141,7 @@ class LLMService {
 
     try {
       const response = await this.complete(prompt, {
-        model: 'claude-3-haiku-20240307',
+        model: 'claude-4-5-haiku-20241022',
         maxTokens: 1500,
         temperature: 0.4,
         systemPrompt: 'You are a career counselor and academic advisor specializing in student development and event recommendations.'
@@ -172,7 +172,7 @@ class LLMService {
 
     try {
       const response = await this.complete(prompt, {
-        model: 'claude-3-haiku-20240307',
+        model: 'claude-4-5-haiku-20241022',
         maxTokens: 800,
         temperature: 0.1,
         systemPrompt: 'You are an expert at extracting structured event information from unstructured email text.'
@@ -203,7 +203,7 @@ class LLMService {
 
     try {
       const response = await this.complete(prompts[type], {
-        model: 'claude-3-sonnet-20240229',
+        model: 'claude-4-5-sonnet-20241022',
         maxTokens: 1200,
         temperature: 0.7,
         systemPrompt: 'You are a friendly, encouraging academic advisor writing personalized emails to students.'
@@ -232,7 +232,7 @@ class LLMService {
 
     try {
       const response = await this.complete(prompt, {
-        model: 'claude-3-haiku-20240307',
+        model: 'claude-4-5-haiku-20241022',
         maxTokens: 1000,
         temperature: 0.3,
         systemPrompt: 'You are an academic advisor helping students manage their time and priorities effectively.'
