@@ -1,0 +1,83 @@
+# College Event Tracker - Backend Deployment (Render)
+
+services:
+  - type: web
+    name: college-event-tracker-backend
+    runtime: node
+    buildCommand: "npm install"
+    startCommand: "npm start"
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: MONGODB_URI
+        sync: false # Set in Render dashboard
+      - key: JWT_SECRET
+        generateValue: true # Auto-generate secure secret
+      - key: FRONTEND_URL
+        sync: false # Set to your Vercel URL
+      - key: DEEPSEEK_API_KEY
+        sync: false # Set in Render dashboard
+      - key: CLAUDE_API_KEY
+        sync: false # Set in Render dashboard
+      - key: GOOGLE_CLIENT_ID
+        sync: false # Set in Render dashboard
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false # Set in Render dashboard
+      - key: GOOGLE_REDIRECT_URI
+        sync: false # Set to your Render URL + /api/calendar/oauth2callback
+      - key: EMAIL_HOST
+        sync: false # Set in Render dashboard
+      - key: EMAIL_PORT
+        value: 587
+      - key: EMAIL_USER
+        sync: false # Set in Render dashboard
+      - key: EMAIL_PASS
+        sync: false # Set in Render dashboard
+      - key: VAPID_PUBLIC_KEY
+        sync: false # Generated VAPID keys
+      - key: VAPID_PRIVATE_KEY
+        sync: false # Generated VAPID keys
+      - key: LLM_FEATURES
+        value: prep_checklist,recommendations,email_content
+      - key: GOOGLE_ANALYTICS_ID
+        sync: false # Set in Render dashboard
+      - key: MIXPANEL_TOKEN
+        sync: false # Set in Render dashboard
+      - key: SENTRY_DSN
+        sync: false # Set in Render dashboard
+      - key: DATADOG_API_KEY
+        sync: false # Set in Render dashboard
+      - key: STRIPE_PUBLISHABLE_KEY
+        sync: false # Set in Render dashboard
+      - key: STRIPE_SECRET_KEY
+        sync: false # Set in Render dashboard
+      - key: TWILIO_ACCOUNT_SID
+        sync: false # Set in Render dashboard
+      - key: TWILIO_AUTH_TOKEN
+        sync: false # Set in Render dashboard
+      - key: TWILIO_PHONE_NUMBER
+        sync: false # Set in Render dashboard
+      - key: AWS_ACCESS_KEY_ID
+        sync: false # Set in Render dashboard
+      - key: AWS_SECRET_ACCESS_KEY
+        sync: false # Set in Render dashboard
+      - key: AWS_S3_BUCKET
+        sync: false # Set in Render dashboard
+      - key: SLACK_BOT_TOKEN
+        sync: false # Set in Render dashboard
+      - key: DISCORD_BOT_TOKEN
+        sync: false # Set in Render dashboard
+      - key: CANVAS_API_KEY
+        sync: false # Set in Render dashboard
+      - key: CANVAS_BASE_URL
+        sync: false # Set in Render dashboard
+      - key: FEATURE_FLAGS
+        sync: false # Set in Render dashboard
+
+# Database (MongoDB Atlas - set up separately)
+# Make sure to whitelist Render's IP ranges in MongoDB Atlas network access
+
+# Health check
+healthCheckPath: /

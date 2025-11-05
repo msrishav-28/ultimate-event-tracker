@@ -1,0 +1,35 @@
+# College Event Tracker - Frontend Deployment
+
+# Build settings
+framework: "vite"
+
+# Build command
+buildCommand: "npm run build"
+
+# Output directory
+outputDirectory: "dist"
+
+# Install command
+installCommand: "npm install"
+
+# Environment variables (set these in Vercel dashboard)
+# VITE_API_URL=https://your-render-backend-url.onrender.com/api
+# VITE_APP_VAPID_PUBLIC_KEY=your-vapid-public-key
+
+# Redirects for SPA
+rewrites:
+  - source: "/((?!api/).*)"
+    destination: "/index.html"
+
+# Headers for security
+headers:
+  - source: "/(.*)"
+    headers:
+      - key: "X-Frame-Options"
+        value: "DENY"
+      - key: "X-Content-Type-Options"
+        value: "nosniff"
+      - key: "Referrer-Policy"
+        value: "strict-origin-when-cross-origin"
+      - key: "Permissions-Policy"
+        value: "camera=(), microphone=(), geolocation=()"
