@@ -25,7 +25,12 @@
     "web-push": "^3.6.7",
     "nodemailer": "^6.9.8",
     "googleapis": "^135.0.0",
-    "@anthropic-ai/sdk": "^0.5.7"
+    "@anthropic-ai/sdk": "^0.5.7",
+    "@google-cloud/vision": "^4.3.2",
+    "@google-cloud/documentai": "^8.8.0",
+    "sharp": "^0.33.5",
+    "pdf-parse": "^1.1.1",
+    "pdf-lib": "^1.17.1"
   },
   "devDependencies": {
     "nodemon": "^3.0.1",

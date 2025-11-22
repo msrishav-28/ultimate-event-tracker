@@ -64,6 +64,5 @@ temp/
 *.sqlite
 *.sqlite3
 
-
-#Ignore vscode AI rules
-.github\instructions\codacy.instructions.md
+# Codacy instructions
+.github/instructions/codacy.instructions.md

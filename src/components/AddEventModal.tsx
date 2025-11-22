@@ -180,15 +180,20 @@ export function AddEventModal({ open, onClose }: AddEventModalProps) {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    if (file.size > 10 * 1024 * 1024) {
-      toast.error('File size must be less than 10MB');
+    if (file.size > 20 * 1024 * 1024) {
+      toast.error('File size must be less than 20MB');
       return;
     }
 
-    // Show image preview
+    // Check file type
+    const isPDF = file.type === 'application/pdf';
+    
+    // Show file preview (image only, PDFs show filename)
     const reader = new FileReader();
     reader.onload = async (e) => {
-      setUploadedImage(e.target?.result as string);
+      if (!isPDF) {
+        setUploadedImage(e.target?.result as string);
+      }
       setIsProcessing(true);
 
       try {
@@ -204,7 +209,7 @@ export function AddEventModal({ open, onClose }: AddEventModalProps) {
           priority: result.priority === 5 ? 'critical' :
                    result.priority === 4 ? 'high' :
                    result.priority === 3 ? 'medium' : 'low',
-          description: result.description || 'Event extracted from poster',
+          description: result.description || (isPDF ? 'Event extracted from PDF' : 'Event extracted from poster'),
           source: 'image' as const,
           confidence: result.extractionConfidence || 0.8,
         };
@@ -212,11 +217,11 @@ export function AddEventModal({ open, onClose }: AddEventModalProps) {
         setEventData({ ...eventData, ...extracted });
         setIsProcessing(false);
         setStep('review');
-        toast.success('Event details extracted from image!');
+        toast.success(`Event details extracted from ${isPDF ? 'PDF' : 'image'}!`);
       } catch (error) {
-        console.error('Image processing error:', error);
+        console.error('File processing error:', error);
         setIsProcessing(false);
-        toast.error('Failed to process image. Please try again.');
+        toast.error(`Failed to process ${isPDF ? 'PDF' : 'image'}. Please try again.`);
       }
     };
     reader.readAsDataURL(file);
@@ -326,9 +331,9 @@ export function AddEventModal({ open, onClose }: AddEventModalProps) {
                 className="p-6 border-2 rounded-lg hover:border-blue-500 transition-all hover:shadow-md text-left space-y-2"
               >
                 <ImageIcon className="w-8 h-8" style={{ color: '#1976D2' }} />
-                <h3 className="text-[14px]" style={{ color: '#212121' }}>Upload Poster</h3>
+                <h3 className="text-[14px]" style={{ color: '#212121' }}>Upload Poster/PDF</h3>
                 <p className="text-[12px]" style={{ color: '#757575' }}>
-                  Extract details from event poster
+                  Extract details from poster or document
                 </p>
               </button>
 
@@ -434,7 +439,7 @@ export function AddEventModal({ open, onClose }: AddEventModalProps) {
             <input
               ref={fileInputRef}
               type="file"
-              accept="image/*"
+              accept="image/*,application/pdf"
               className="hidden"
               onChange={handleImageUpload}
             />
@@ -447,10 +452,10 @@ export function AddEventModal({ open, onClose }: AddEventModalProps) {
                 <Upload className="w-12 h-12 mx-auto" style={{ color: '#1976D2' }} />
                 <div>
                   <p className="text-[14px]" style={{ color: '#212121' }}>
-                    Drag poster here or click to upload
+                    Drag poster/document here or click to upload
                   </p>
                   <p className="text-[12px] mt-1" style={{ color: '#757575' }}>
-                    JPEG, PNG, WebP (max 10MB)
+                    Images (JPEG, PNG, WebP) or PDF (max 20MB)
                   </p>
                 </div>
               </button>

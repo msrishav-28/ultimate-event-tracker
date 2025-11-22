@@ -3,12 +3,39 @@ const multer = require('multer');
 const nlp = require('compromise');
 const chrono = require('chrono-node');
 const Anthropic = require('@anthropic-ai/sdk');
+const vision = require('@google-cloud/vision');
+const { DocumentProcessorServiceClient } = require('@google-cloud/documentai');
+const sharp = require('sharp');
+const pdfParse = require('pdf-parse');
+const { PDFDocument } = require('pdf-lib');
 const { authenticate } = require('../middleware/auth');
 
 // Initialize Claude client
 const anthropic = new Anthropic({
   apiKey: process.env.CLAUDE_API_KEY,
 });
+
+// Initialize Google Cloud Vision client
+let visionClient = null;
+if (process.env.GOOGLE_CLOUD_CREDENTIALS) {
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
+    visionClient = new vision.ImageAnnotatorClient({ credentials });
+  } catch (error) {
+    console.warn('Google Cloud Vision not configured:', error.message);
+  }
+}
+
+// Initialize Google Cloud Document AI client
+let documentAIClient = null;
+if (process.env.GOOGLE_CLOUD_CREDENTIALS) {
+  try {
+    const credentials = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
+    documentAIClient = new DocumentProcessorServiceClient({ credentials });
+  } catch (error) {
+    console.warn('Google Cloud Document AI not configured:', error.message);
+  }
+}
 
 const router = express.Router();
 
@@ -17,31 +44,42 @@ const OCR_APIS = {
   DEEPSEEK: {
     url: 'https://platform.deepseek.com/api/v1/ocr',
     key: process.env.DEEPSEEK_API_KEY,
-    timeout: 10000, // 10 seconds
+    timeout: 10000,
   },
-  PADDLEOCR: {
-    url: 'https://api.paddlepaddle.org.cn/paddlehub/ocr',
-    key: process.env.PADDLEOCR_API_KEY,
-    timeout: 15000, // 15 seconds
+  GOOGLE_VISION: {
+    enabled: !!visionClient,
+    timeout: 15000,
+  },
+  GOOGLE_DOCUMENT_AI: {
+    enabled: !!documentAIClient,
+    projectId: process.env.GOOGLE_CLOUD_PROJECT_ID,
+    location: process.env.GOOGLE_CLOUD_LOCATION || 'us',
+    processorId: process.env.GOOGLE_DOCUMENT_AI_PROCESSOR_ID,
+    timeout: 30000,
   },
   CLAUDE: {
     model: 'claude-4-5-sonnet-20241022',
     maxTokens: 1024,
-    timeout: 20000, // 20 seconds
+    timeout: 20000,
   }
 };
 
 // All routes require authentication
 router.use(authenticate);
 
-// Configure multer for file uploads
+// Configure multer for file uploads (images and PDFs)
 const upload = multer({
-  limits: { fileSize: 10 * 1024 * 1024 }, // 10MB
+  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB for PDFs
   fileFilter: (req, file, cb) => {
-    if (file.mimetype.startsWith('image/')) {
+    const allowedMimes = [
+      'image/jpeg', 'image/jpg', 'image/png', 'image/webp',
+      'image/gif', 'image/bmp', 'image/tiff',
+      'application/pdf'
+    ];
+    if (allowedMimes.includes(file.mimetype)) {
       cb(null, true);
     } else {
-      cb(new Error('Only image files are allowed'));
+      cb(new Error('Only image and PDF files are allowed'));
     }
   }
 });
@@ -305,77 +343,452 @@ Format your response as JSON:
   }
 }
 
-// OCR Processing Function with Real APIs
+// ========================= IMAGE PREPROCESSING =========================
+
+// Preprocess image for optimal OCR results
+async function preprocessImage(imageBuffer) {
+  try {
+    const image = sharp(imageBuffer);
+    const metadata = await image.metadata();
+    
+    // Auto-rotate based on EXIF orientation
+    let processed = image.rotate();
+    
+    // Resize if too large (max 4000px on longest side)
+    const maxDimension = 4000;
+    if (metadata.width > maxDimension || metadata.height > maxDimension) {
+      processed = processed.resize(maxDimension, maxDimension, {
+        fit: 'inside',
+        withoutEnlargement: true
+      });
+    }
+    
+    // Convert to grayscale for better text detection
+    processed = processed.grayscale();
+    
+    // Enhance contrast using histogram normalization
+    processed = processed.normalize();
+    
+    // Sharpen for better edge detection
+    processed = processed.sharpen({
+      sigma: 1.5,
+      m1: 1.0,
+      m2: 0.5
+    });
+    
+    // Reduce noise
+    processed = processed.median(3);
+    
+    // Threshold for clean binary image (improves OCR)
+    processed = processed.threshold(128, {
+      grayscale: false
+    });
+    
+    const processedBuffer = await processed.toBuffer();
+    
+    console.log('Image preprocessing completed:', {
+      originalSize: `${metadata.width}x${metadata.height}`,
+      format: metadata.format
+    });
+    
+    return processedBuffer;
+  } catch (error) {
+    console.error('Image preprocessing error:', error.message);
+    // Return original buffer if preprocessing fails
+    return imageBuffer;
+  }
+}
+
+// Detect and rotate text regions
+async function detectTextRotation(imageBuffer) {
+  try {
+    if (!visionClient) return 0;
+    
+    const [result] = await visionClient.textDetection({
+      image: { content: imageBuffer }
+    });
+    
+    const textAnnotations = result.textAnnotations;
+    if (!textAnnotations || textAnnotations.length === 0) return 0;
+    
+    // Get the first full text annotation which contains rotation info
+    const fullText = textAnnotations[0];
+    if (!fullText.boundingPoly || !fullText.boundingPoly.vertices) return 0;
+    
+    // Calculate rotation angle from bounding box
+    const vertices = fullText.boundingPoly.vertices;
+    const angle = Math.atan2(
+      vertices[1].y - vertices[0].y,
+      vertices[1].x - vertices[0].x
+    ) * (180 / Math.PI);
+    
+    return angle;
+  } catch (error) {
+    console.log('Text rotation detection failed:', error.message);
+    return 0;
+  }
+}
+
+// ========================= GOOGLE CLOUD VISION API =========================
+
+async function processWithGoogleVision(imageBuffer) {
+  if (!visionClient) {
+    throw new Error('Google Vision client not configured');
+  }
+  
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OCR_APIS.GOOGLE_VISION.timeout);
+  
+  try {
+    const [result] = await visionClient.documentTextDetection({
+      image: { content: imageBuffer }
+    });
+    
+    clearTimeout(timeoutId);
+    
+    const fullTextAnnotation = result.fullTextAnnotation;
+    if (!fullTextAnnotation || !fullTextAnnotation.text) {
+      throw new Error('No text detected by Google Vision');
+    }
+    
+    const extractedText = fullTextAnnotation.text;
+    
+    // Calculate confidence from individual pages
+    let totalConfidence = 0;
+    let wordCount = 0;
+    
+    if (fullTextAnnotation.pages) {
+      for (const page of fullTextAnnotation.pages) {
+        for (const block of page.blocks || []) {
+          for (const paragraph of block.paragraphs || []) {
+            for (const word of paragraph.words || []) {
+              if (word.confidence) {
+                totalConfidence += word.confidence;
+                wordCount++;
+              }
+            }
+          }
+        }
+      }
+    }
+    
+    const averageConfidence = wordCount > 0 ? totalConfidence / wordCount : 0.9;
+    
+    console.log('Google Vision OCR completed with confidence:', averageConfidence);
+    
+    return {
+      text: extractedText,
+      confidence: averageConfidence
+    };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
+}
+
+// ========================= GOOGLE CLOUD DOCUMENT AI =========================
+
+async function processWithDocumentAI(fileBuffer, mimeType) {
+  if (!documentAIClient || !OCR_APIS.GOOGLE_DOCUMENT_AI.processorId) {
+    throw new Error('Google Document AI not configured');
+  }
+  
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), OCR_APIS.GOOGLE_DOCUMENT_AI.timeout);
+  
+  try {
+    const projectId = OCR_APIS.GOOGLE_DOCUMENT_AI.projectId;
+    const location = OCR_APIS.GOOGLE_DOCUMENT_AI.location;
+    const processorId = OCR_APIS.GOOGLE_DOCUMENT_AI.processorId;
+    
+    const name = `projects/${projectId}/locations/${location}/processors/${processorId}`;
+    
+    const request = {
+      name,
+      rawDocument: {
+        content: fileBuffer.toString('base64'),
+        mimeType: mimeType
+      }
+    };
+    
+    const [result] = await documentAIClient.processDocument(request);
+    clearTimeout(timeoutId);
+    
+    const { document } = result;
+    if (!document || !document.text) {
+      throw new Error('No text detected by Document AI');
+    }
+    
+    const extractedText = document.text;
+    
+    // Calculate confidence from entities and pages
+    let totalConfidence = 0;
+    let confidenceCount = 0;
+    
+    if (document.pages) {
+      for (const page of document.pages) {
+        if (page.tokens) {
+          for (const token of page.tokens) {
+            if (token.confidence) {
+              totalConfidence += token.confidence;
+              confidenceCount++;
+            }
+          }
+        }
+      }
+    }
+    
+    const averageConfidence = confidenceCount > 0 ? totalConfidence / confidenceCount : 0.95;
+    
+    console.log('Google Document AI completed with confidence:', averageConfidence);
+    
+    return {
+      text: extractedText,
+      confidence: averageConfidence
+    };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    throw error;
+  }
+}
+
+// ========================= PDF PROCESSING =========================
+
+async function processPDF(fileBuffer) {
+  try {
+    const pdfData = await pdfParse(fileBuffer);
+    
+    if (!pdfData.text || pdfData.text.trim().length === 0) {
+      // If text extraction failed, convert PDF to images and use OCR
+      return await convertPDFToImagesAndOCR(fileBuffer);
+    }
+    
+    console.log('PDF text extraction completed, pages:', pdfData.numpages);
+    
+    return {
+      text: pdfData.text,
+      confidence: 0.95, // High confidence for native PDF text
+      pages: pdfData.numpages
+    };
+  } catch (error) {
+    console.error('PDF parsing error:', error.message);
+    // Fallback to image-based OCR
+    return await convertPDFToImagesAndOCR(fileBuffer);
+  }
+}
+
+async function convertPDFToImagesAndOCR(pdfBuffer) {
+  // This would require pdf-poppler or similar
+  // For now, try Document AI which handles PDFs natively
+  try {
+    return await processWithDocumentAI(pdfBuffer, 'application/pdf');
+  } catch (error) {
+    throw new Error('Failed to process PDF: ' + error.message);
+  }
+}
+
+// ========================= CONFIDENCE CALCULATION =========================
+
+function calculateOCRConfidence(extractedText, method, rawConfidence) {
+  let confidence = rawConfidence || 0.5;
+  
+  // Base confidence by method (reliability ranking)
+  const methodBaseConfidence = {
+    'google-document-ai': 0.95,
+    'google-vision': 0.92,
+    'deepseek-ocr': 0.88,
+    'claude-vision': 0.85,
+    'paddleocr': 0.80
+  };
+  
+  const baseConfidence = methodBaseConfidence[method] || 0.5;
+  confidence = (confidence + baseConfidence) / 2;
+  
+  // Adjust based on text characteristics
+  if (extractedText && extractedText.length > 0) {
+    // Text length factor (too short or too long might indicate errors)
+    const textLength = extractedText.length;
+    if (textLength < 10) {
+      confidence *= 0.7; // Very short text is suspicious
+    } else if (textLength > 50 && textLength < 1000) {
+      confidence *= 1.1; // Good text length
+    } else if (textLength > 5000) {
+      confidence *= 0.9; // Very long might have noise
+    }
+    
+    // Special character ratio (too many special chars = likely noise)
+    const specialCharCount = (extractedText.match(/[^a-zA-Z0-9\s\-:,.]/g) || []).length;
+    const specialCharRatio = specialCharCount / textLength;
+    if (specialCharRatio > 0.3) {
+      confidence *= 0.7; // High special char ratio
+    } else if (specialCharRatio < 0.05) {
+      confidence *= 1.05; // Clean text
+    }
+    
+    // Word count (good indicator of quality)
+    const words = extractedText.trim().split(/\s+/);
+    const wordCount = words.length;
+    if (wordCount > 5 && wordCount < 500) {
+      confidence *= 1.05; // Good word count for an event poster
+    }
+    
+    // Check for common event-related keywords
+    const eventKeywords = [
+      'event', 'workshop', 'seminar', 'competition', 'webinar',
+      'date', 'time', 'location', 'venue', 'register', 'rsvp',
+      'speaker', 'organized by', 'presented by', 'when', 'where'
+    ];
+    const lowerText = extractedText.toLowerCase();
+    const keywordMatches = eventKeywords.filter(kw => lowerText.includes(kw)).length;
+    if (keywordMatches >= 2) {
+      confidence *= 1.1; // Contains event-related keywords
+    }
+    
+    // Date/time detection bonus
+    const hasDate = /\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}/.test(extractedText);
+    const hasTime = /\d{1,2}:\d{2}/.test(extractedText);
+    if (hasDate && hasTime) {
+      confidence *= 1.1;
+    } else if (hasDate || hasTime) {
+      confidence *= 1.05;
+    }
+    
+    // Consecutive uppercase letters (might indicate headers)
+    const upperCaseSequences = extractedText.match(/[A-Z]{3,}/g);
+    if (upperCaseSequences && upperCaseSequences.length > 0 && upperCaseSequences.length < 5) {
+      confidence *= 1.02; // Good - likely headers
+    }
+  }
+  
+  // Cap confidence at 0.98 (never 100% certain)
+  confidence = Math.min(confidence, 0.98);
+  confidence = Math.max(confidence, 0.1); // Floor at 0.1
+  
+  return parseFloat(confidence.toFixed(3));
+}
+
+// ========================= MAIN OCR PROCESSING FUNCTION =========================
+
+// OCR Processing Function with Real APIs and Comprehensive Fallback Chain
 async function processImageWithOCR(file) {
   try {
     console.log('Starting OCR processing for file:', file.originalname);
-
-    // Convert buffer to base64 for API calls
-    const base64Image = file.buffer.toString('base64');
     const mimeType = file.mimetype;
+    
+    // Handle PDFs separately
+    if (mimeType === 'application/pdf') {
+      console.log('Processing PDF file...');
+      const pdfResult = await processPDF(file.buffer);
+      const nlpResult = await processTextWithNLP(pdfResult.text);
+      const finalConfidence = calculateOCRConfidence(pdfResult.text, 'pdf-extraction', pdfResult.confidence);
+      
+      return {
+        ...nlpResult,
+        extractionConfidence: finalConfidence,
+        extractionMethod: 'pdf-extraction',
+        rawExtractedText: pdfResult.text,
+        pdfPages: pdfResult.pages
+      };
+    }
+
+    // Preprocess image for optimal OCR
+    console.log('Preprocessing image...');
+    let processedBuffer = await preprocessImage(file.buffer);
+    const base64Image = processedBuffer.toString('base64');
     const dataUrl = `data:${mimeType};base64,${base64Image}`;
 
     let extractedText = null;
-    let confidence = 0;
+    let rawConfidence = 0;
     let method = 'unknown';
 
-    // Try DeepSeek OCR first (97% accuracy target)
+    // === TIER 1: DeepSeek OCR (Fast, Good for clean text) ===
     try {
-      console.log('Attempting DeepSeek OCR...');
+      console.log('Tier 1: Attempting DeepSeek OCR...');
       const deepseekResult = await processWithDeepSeek(base64Image, mimeType);
-      if (deepseekResult && deepseekResult.confidence > 0.92) {
-        extractedText = deepseekResult.text;
-        confidence = deepseekResult.confidence;
-        method = 'deepseek-ocr';
-        console.log('DeepSeek OCR successful, confidence:', confidence);
+      if (deepseekResult && deepseekResult.text && deepseekResult.text.trim().length > 10) {
+        const confidence = calculateOCRConfidence(deepseekResult.text, 'deepseek-ocr', deepseekResult.confidence);
+        if (confidence > 0.85) {
+          extractedText = deepseekResult.text;
+          rawConfidence = confidence;
+          method = 'deepseek-ocr';
+          console.log('✓ DeepSeek OCR successful, confidence:', confidence);
+        }
       }
     } catch (error) {
-      console.log('DeepSeek OCR failed:', error.message);
+      console.log('✗ DeepSeek OCR failed:', error.message);
     }
 
-    // Fallback to PaddleOCR if DeepSeek failed or confidence too low
-    if (!extractedText || confidence < 0.92) {
+    // === TIER 2: Google Cloud Vision (Better for decorative fonts) ===
+    if (!extractedText || rawConfidence < 0.90) {
       try {
-        console.log('Attempting PaddleOCR fallback...');
-        const paddleResult = await processWithPaddleOCR(base64Image, mimeType);
-        if (paddleResult && paddleResult.confidence > confidence) {
-          extractedText = paddleResult.text;
-          confidence = paddleResult.confidence;
-          method = 'paddleocr';
-          console.log('PaddleOCR successful, confidence:', confidence);
+        console.log('Tier 2: Attempting Google Cloud Vision...');
+        const visionResult = await processWithGoogleVision(processedBuffer);
+        if (visionResult && visionResult.text && visionResult.text.trim().length > 10) {
+          const confidence = calculateOCRConfidence(visionResult.text, 'google-vision', visionResult.confidence);
+          if (confidence > rawConfidence) {
+            extractedText = visionResult.text;
+            rawConfidence = confidence;
+            method = 'google-vision';
+            console.log('✓ Google Vision successful, confidence:', confidence);
+          }
         }
       } catch (error) {
-        console.log('PaddleOCR failed:', error.message);
+        console.log('✗ Google Vision failed:', error.message);
       }
     }
 
-    // Final fallback to Claude Vision if both failed
-    if (!extractedText || confidence < 0.8) {
+    // === TIER 3: Claude Vision (Excellent for complex layouts and stylized text) ===
+    if (!extractedText || rawConfidence < 0.85) {
       try {
-        console.log('Attempting Claude Vision final fallback...');
+        console.log('Tier 3: Attempting Claude Vision...');
         const claudeResult = await processWithClaudeVision(dataUrl);
-        if (claudeResult && claudeResult.confidence > confidence) {
-          extractedText = claudeResult.text;
-          confidence = claudeResult.confidence;
-          method = 'claude-vision';
-          console.log('Claude Vision successful, confidence:', confidence);
+        if (claudeResult && claudeResult.text && claudeResult.text.trim().length > 10) {
+          const confidence = calculateOCRConfidence(claudeResult.text, 'claude-vision', claudeResult.confidence);
+          if (confidence > rawConfidence) {
+            extractedText = claudeResult.text;
+            rawConfidence = confidence;
+            method = 'claude-vision';
+            console.log('✓ Claude Vision successful, confidence:', confidence);
+          }
         }
       } catch (error) {
-        console.log('Claude Vision failed:', error.message);
+        console.log('✗ Claude Vision failed:', error.message);
       }
     }
 
-    if (!extractedText) {
-      throw new Error('All OCR services failed to extract text from image');
+    // === TIER 4: Google Document AI (Last resort - most comprehensive) ===
+    if (!extractedText || rawConfidence < 0.80) {
+      try {
+        console.log('Tier 4: Attempting Google Document AI (final fallback)...');
+        const documentAIResult = await processWithDocumentAI(file.buffer, mimeType);
+        if (documentAIResult && documentAIResult.text && documentAIResult.text.trim().length > 10) {
+          const confidence = calculateOCRConfidence(documentAIResult.text, 'google-document-ai', documentAIResult.confidence);
+          if (confidence > rawConfidence) {
+            extractedText = documentAIResult.text;
+            rawConfidence = confidence;
+            method = 'google-document-ai';
+            console.log('✓ Google Document AI successful, confidence:', confidence);
+          }
+        }
+      } catch (error) {
+        console.log('✗ Google Document AI failed:', error.message);
+      }
+    }
+
+    // If still no text, throw error
+    if (!extractedText || extractedText.trim().length === 0) {
+      throw new Error('All OCR services failed to extract meaningful text from image');
     }
 
     // Process extracted text with NLP to extract event details
     console.log('Processing extracted text with NLP...');
+    console.log(`Final OCR method: ${method}, confidence: ${rawConfidence.toFixed(3)}`);
+    
     const nlpResult = await processTextWithNLP(extractedText);
 
     return {
       ...nlpResult,
-      extractionConfidence: confidence,
+      extractionConfidence: rawConfidence,
       extractionMethod: method,
       rawExtractedText: extractedText
     };
